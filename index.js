@@ -3,8 +3,9 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); // Import bcryptjs
+const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 // --- MULTER CONFIG ---
@@ -23,7 +24,7 @@ mongoose.connect(process.env.MONGO_URI)
 const UserSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
-  password: { type: String, required: true }, // Store hashed password
+  password: { type: String, required: true },
   avatar: { type: String, default: 'https://via.placeholder.com/150' },
   joinDate: { type: Date, default: Date.now },
   resetPasswordToken: String,
@@ -56,7 +57,6 @@ const authMiddleware = async (req, res, next) => {
     if (!authHeader) return res.status(401).json({ message: 'Authorization token required.' });
     const token = authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'Token format is "Bearer TOKEN".' });
-
     const user = await User.findById(token);
     if (user) {
       req.userId = user._id;
@@ -65,7 +65,6 @@ const authMiddleware = async (req, res, next) => {
       res.status(403).json({ message: 'Invalid or unknown user token.' });
     }
   } catch (error) {
-    console.error("Auth Middleware Error:", error); // Added specific log
     res.status(500).json({ message: "Internal Server Error during authentication." });
   }
 };
@@ -81,11 +80,9 @@ app.get('/api/products', async (req, res) => {
     if (search) {
       filter.title = { $regex: search, $options: 'i' };
     }
-    console.log("Filtering products with:", filter);
     const products = await Product.find(filter);
     res.json(products);
   } catch (error) {
-    console.error("Error fetching products:", error); // Added specific log
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
@@ -99,7 +96,6 @@ app.get('/api/products/:id', async (req, res) => {
       res.status(404).json({ message: 'Product not found' });
     }
   } catch (error) {
-    console.error("Error fetching single product:", error); // Added specific log
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
@@ -118,155 +114,167 @@ app.post('/api/products', authMiddleware, upload.single('image'), async (req, re
     await newProduct.save();
     res.status(201).json(newProduct);
   } catch (error) {
-    console.error("Error posting product:", error); // Added specific log
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
 
-// DELETE a product (NEW!)
-app.delete('/api/products/:id', authMiddleware, async (req, res) => {
+app.put('/api/products/:id', authMiddleware, async (req, res) => {
   try {
+    const { title, price, description, category } = req.body;
     const product = await Product.findById(req.params.id);
-
     if (!product) {
       return res.status(404).json({ message: 'Product not found.' });
     }
-
-    // Ensure the user deleting the product is the one who created it
     if (product.sellerId.toString() !== req.userId.toString()) {
-      return res.status(403).json({ message: 'User not authorized to delete this product.' });
+      return res.status(403).json({ message: 'User not authorized to edit this product.' });
     }
-
-    await Product.findByIdAndDelete(req.params.id);
-
-    // Note: In a real app, you would also delete the associated image file from the 'uploads' folder here.
-    // We will skip that for now to keep it simple.
-
-    res.json({ message: 'Product deleted successfully.' });
+    product.title = title;
+    product.price = price;
+    product.description = description;
+    product.category = category;
+    const updatedProduct = await product.save();
+    res.json(updatedProduct);
   } catch (error) {
-    console.error("Error deleting product:", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
 
-// --- AUTH ROUTES (WITH DETAILED DEBUGGING LOGS) ---
+app.delete('/api/products/:id', authMiddleware, async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found.' });
+    }
+    if (product.sellerId.toString() !== req.userId.toString()) {
+      return res.status(403).json({ message: 'User not authorized to delete this product.' });
+    }
+    await Product.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Product deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
 
-// POST User Signup
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'Seller not found.' });
+    }
+    res.json({ name: user.name, email: user.email });
+  } catch (error) {
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+// --- AUTH ROUTES ---
 app.post('/api/auth/signup', async (req, res) => {
-  console.log('--- Signup Attempt ---');
   try {
     const { name, email, password } = req.body;
-    console.log('Received signup request for email:', email);
-
     if (!name || !email || !password) {
-      console.log('Signup failed: Missing fields.');
       return res.status(400).json({ message: 'All fields are required.' });
     }
-    
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      console.log('Signup failed: Email already exists:', email);
       return res.status(409).json({ message: 'An account with this email already exists.' });
     }
-
     const salt = await bcrypt.genSalt(10);
-    console.log('Generated salt for password.');
     const hashedPassword = await bcrypt.hash(password, salt);
-    console.log('Hashed password successfully.');
-
     const newUser = new User({ name, email, password: hashedPassword });
     await newUser.save();
-    console.log('New user saved to DB:', email);
-    
     const { password: _, ...userToSend } = newUser.toObject();
     res.status(201).json({
       message: 'User created successfully!',
       user: userToSend,
       token: userToSend._id
     });
-    console.log('Signup successful, response sent for:', email);
   } catch (error) {
-    console.error("Signup Error (Catch Block):", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
-  console.log('--- End Signup Attempt ---');
 });
 
-// POST User Login
 app.post('/api/auth/login', async (req, res) => {
-  console.log('--- Login Attempt ---');
   try {
     const { email, password } = req.body;
-    console.log('Received login request for email:', email);
-
-    // Find the user by email only
     const user = await User.findOne({ email });
     if (!user) {
-      console.log('Login failed: User not found for email:', email);
       return res.status(401).json({ message: 'Invalid email or password' });
     }
-    console.log('User found for email:', user.email);
-
-    // Compare the provided password with the stored hash
-    // This is where the error likely occurs if the stored password isn't hashed or is null/undefined
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      console.log('Login failed: Password mismatch for email:', email);
       return res.status(401).json({ message: 'Invalid email or password' });
     }
-    console.log('Password matched for user:', user.email);
-
-    // POST Forgot Password (NEW!)
-app.post('/api/auth/forgot-password', async (req, res) => {
-  try {
-    const { email } = req.body;
-    const user = await User.findOne({ email });
-
-    if (!user) {
-      // Security best practice: Don't reveal if an email is registered or not.
-      // Always send a generic success message.
-      console.log(`Password reset attempt for non-existent email: ${email}`);
-      return res.json({ message: 'If an account with that email exists, a password reset link has been sent.' });
-    }
-
-    // Generate a random, secure token
-    const token = crypto.randomBytes(20).toString('hex');
-
-    // Set the token and its expiration on the user's document
-    user.resetPasswordToken = token;
-    user.resetPasswordExpires = Date.now() + 3600000; // Token expires in 1 hour
-
-    await user.save();
-
-    // --- SIMULATE SENDING AN EMAIL ---
-    // In a real production app, you would use a service like SendGrid, Mailgun, or Nodemailer here.
-    // For our project, we will log the link to the console.
-    const resetLink = `http://localhost:5173/reset-password/${token}`;
-    console.log('--- PASSWORD RESET ---');
-    console.log(`A password reset was requested for: ${user.email}`);
-    console.log(`Reset Link (copy this and paste in browser): ${resetLink}`);
-    console.log('--------------------');
-
-    res.json({ message: 'If an account with that email exists, a password reset link has been sent.' });
-  } catch (error) {
-    console.error("Forgot Password Error:", error);
-    res.status(500).json({ message: "Internal Server Error" });
-  }
-});
-    
-    // Login successful
     const { password: _, ...userToSend } = user.toObject();
     res.json({
       message: "Login successful!",
       user: userToSend,
       token: userToSend._id
     });
-    console.log('Login successful, response sent for:', email);
   } catch (error) {
-    console.error("Login Error (Catch Block):", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
-  console.log('--- End Login Attempt ---');
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+    }
+    const token = crypto.randomBytes(20).toString('hex');
+    user.resetPasswordToken = token;
+    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+    await user.save();
+    
+    const transporter = nodemailer.createTransport({
+      host: process.env.EMAIL_HOST,
+      port: process.env.EMAIL_PORT,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+      }
+    });
+
+    const resetLink = `http://localhost:5173/reset-password/${token}`;
+
+    const mailOptions = {
+      from: '"Campus Kart Support" <no-reply@campuskart.com>',
+      to: user.email,
+      subject: 'Your Campus Kart Password Reset Link',
+      html: `<p>Please click the following link to reset your password: <a href="${resetLink}">${resetLink}</a></p>`
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`Password reset email sent to Mailtrap for: ${user.email}`);
+    
+    res.json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+  } catch (error) {
+    console.error("Forgot Password Error:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+app.post('/api/auth/reset-password/:token', async (req, res) => {
+  try {
+    const user = await User.findOne({
+      resetPasswordToken: req.params.token,
+      resetPasswordExpires: { $gt: Date.now() },
+    });
+    if (!user) {
+      return res.status(400).json({ message: 'Password reset token is invalid or has expired.' });
+    }
+    const { password } = req.body;
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+    res.json({ message: 'Your password has been updated successfully.' });
+  } catch (error) {
+    res.status(500).json({ message: "Internal Server Error" });
+  }
 });
 
 // --- START SERVER ---
