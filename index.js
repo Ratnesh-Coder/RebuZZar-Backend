@@ -25,11 +25,28 @@ const UserSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  avatar: { type: String, default: 'https://via.placeholder.com/150' },
-  joinDate: { type: Date, default: Date.now },
-  resetPasswordToken: String,
-  resetPasswordExpires: Date,
+  avatar: { 
+    type: String, 
+    required: true, 
+    default: 'https://via.placeholder.com/150' 
+  },
+  joinDate: { 
+    type: Date, 
+    required: true, 
+    default: Date.now 
+  },
+  department: { type: String, required: true },
+  programName: { type: String, required: true },
+  section: { type: String, required: true },
+  rollNumber: { type: String, required: true },
+  studentCode: { type: String, required: true },
+  registrationNumber: { type: String, required: true },
+
+  // Optional fields for password reset
+  resetPasswordToken: { type: String },
+  resetPasswordExpires: { type: Date },
 });
+
 const User = mongoose.model('User', UserSchema);
 
 const ProductSchema = new mongoose.Schema({
@@ -96,6 +113,17 @@ app.get('/api/products/:id', async (req, res) => {
       res.status(404).json({ message: 'Product not found' });
     }
   } catch (error) {
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+app.get('/api/profile/products', authMiddleware, async (req, res) => {
+  try {
+    // req.userId is attached by the authMiddleware
+    const userProducts = await Product.find({ sellerId: req.userId });
+    res.json(userProducts);
+  } catch (error) {
+    console.error("Error fetching user products:", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
@@ -167,21 +195,64 @@ app.get('/api/users/:id', async (req, res) => {
   }
 });
 
-// --- AUTH ROUTES ---
+app.put('/api/profile', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { email, password, ...allowedUpdates } = req.body;
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { $set: allowedUpdates },
+      { new: true, runValidators: true }
+    ).select('-password');
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    res.json(updatedUser);
+  } catch (error) {
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+// POST User Signup (UPDATED FOR UNIVERSITY EMAIL VALIDATION)
 app.post('/api/auth/signup', async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-    if (!name || !email || !password) {
+    const { 
+      name, email, password, 
+      department, programName, section, rollNumber, studentCode, registrationNumber 
+    } = req.body;
+
+    // --- NEW: University Email Validation ---
+    const universityDomain = '@brainwareuniversity.ac.in'; // <--- IMPORTANT: Change this to your university's email domain
+    if (!email.endsWith(universityDomain)) {
+      return res.status(400).json({ message: `Registration is only open to users with a students of Brainware Univerity.` });
+    }
+    // ------------------------------------
+
+    if (!name || !password) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({ message: 'An account with this email already exists.' });
     }
+
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
-    const newUser = new User({ name, email, password: hashedPassword });
+
+    const newUser = new User({ 
+      name, 
+      email, 
+      password: hashedPassword,
+      department,
+      programName,
+      section,
+      rollNumber,
+      studentCode,
+      registrationNumber
+    });
     await newUser.save();
+
     const { password: _, ...userToSend } = newUser.toObject();
     res.status(201).json({
       message: 'User created successfully!',
