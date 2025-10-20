@@ -25,22 +25,14 @@ const UserSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  avatar: { 
-    type: String, 
-    required: true, 
-    default: 'https://via.placeholder.com/150' 
-  },
-  joinDate: { 
-    type: Date, 
-    required: true, 
-    default: Date.now 
-  },
-  department: { type: String, required: true },
-  programName: { type: String, required: true },
-  section: { type: String, required: true },
-  rollNumber: { type: String, required: true },
-  studentCode: { type: String, required: true },
-  registrationNumber: { type: String, required: true },
+  avatar: { type: String,  default: 'https://via.placeholder.com/150' },
+  joinDate: { type: Date,  default: Date.now },
+  department: { type: String },
+  programName: { type: String },
+  section: { type: String },
+  rollNumber: { type: String },
+  studentCode: { type: String },
+  registrationNumber: { type: String },
 
   // Optional fields for password reset
   resetPasswordToken: { type: String },
@@ -48,6 +40,7 @@ const UserSchema = new mongoose.Schema({
 });
 
 const User = mongoose.model('User', UserSchema);
+User.collection.dropIndex('id_1').catch(() => {});
 
 const ProductSchema = new mongoose.Schema({
   title: { type: String, required: true },
@@ -260,6 +253,7 @@ app.post('/api/auth/signup', async (req, res) => {
       token: userToSend._id
     });
   } catch (error) {
+    console.error("Signup Error:", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
