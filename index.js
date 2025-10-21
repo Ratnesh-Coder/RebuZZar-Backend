@@ -79,6 +79,35 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
+// --- NEW: AVATAR UPLOAD ROUTE ---
+app.post('/api/profile/avatar', authMiddleware, upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'Avatar image file is required.' });
+    }
+    
+    // Construct the URL for the new avatar
+    const avatarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+
+    // Find the user and update their avatar URL
+    const updatedUser = await User.findByIdAndUpdate(
+      req.userId,
+      { avatar: avatarUrl },
+      { new: true }
+    ).select('-password');
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    console.log(`Avatar updated for user: ${updatedUser.email}`);
+    res.json(updatedUser);
+  } catch (error) {
+    console.error("Error uploading avatar:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
 // --- PRODUCT ROUTES ---
 app.get('/api/products', async (req, res) => {
   try {
