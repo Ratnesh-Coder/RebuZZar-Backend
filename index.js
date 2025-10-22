@@ -400,7 +400,7 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(helmet()); // CHANGE #2
+app.use(helmet());
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*', // set explicit origins in production
 }));
@@ -410,7 +410,6 @@ app.use((req, res, next) => {
   mongoSanitize.sanitize(req.query); // sanitize the copy
   next();
 });
-// CHANGE #3
 
 // --- RATE LIMITERS ---
 // CHANGE #1: apply rate limiting especially to auth endpoints
@@ -478,6 +477,7 @@ const ProductSchema = new mongoose.Schema({
   imageUrl: { type: String, required: true },
   category: { type: String, required: true },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
   postDate: { type: Date, default: Date.now },
 }, { timestamps: true });
 
@@ -775,7 +775,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
       <html>
         <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
           <h2>Password Reset Request</h2>
-          <p>Click the link below to reset your Campus Kart password. This link expires in 1 hour.</p>
+          <p>Click the link below to reset your RebuZZar password. This link expires in 1 hour.</p>
           <p><a href="${resetLink}" style="color: #1f2937; text-decoration: underline;">Reset password</a></p>
           <p>If you didn't request this, you can safely ignore this email.</p>
         </body>
@@ -785,9 +785,9 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
     const text = `Password Reset Request\n\nVisit this link to reset your password (expires in 1 hour):\n\n${resetLink}\n\nIf you didn't request this, ignore this email.`;
 
     const mailOptions = {
-      from: process.env.EMAIL_FROM || '"Campus Kart Support" <no-reply@campuskart.com>',
+      from: process.env.EMAIL_FROM || '"RebuZZar Support" <no-reply@campuskart.com>',
       to: `${user.name || 'User'} <${user.email}>`,
-      subject: 'Your Campus Kart Password Reset Link',
+      subject: 'Your RebuZZar Password Reset Link',
       text,
       html
     };
