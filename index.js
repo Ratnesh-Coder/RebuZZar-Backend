@@ -99,12 +99,30 @@ const ProductSchema = new mongoose.Schema({
   title: { type: String, required: true },
   price: { type: Number, required: true },
   description: { type: String, required: true },
-  imageUrl: { type: String, required: true },
+  imageUrl: { type: [String], required: true },
   category: { type: String, required: true },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
   postDate: { type: Date, default: Date.now },
 }, { timestamps: true });
+
+const BookingSchema = new mongoose.Schema({
+  buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  products: [{
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+    quantity: { type: Number, required: true, default: 1 },
+    price: { type: Number, required: true }
+  }],
+  totalPrice: { type: Number, required: true },
+  status: { 
+    type: String, 
+    enum: ['Booked', 'Dispatched', 'Delivered', 'Cancelled'], 
+    default: 'Booked' 
+  },
+  bookingDate: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const Booking = mongoose.model('Booking', BookingSchema);
 
 // Cascade delete
 UserSchema.pre('findOneAndDelete', async function (next) {
@@ -257,16 +275,23 @@ app.get('/api/profile/products', authMiddleware, asyncHandler(async (req, res) =
 }));
 
 // Create product: upload image to Cloudinary and store returned URL
-app.post('/api/products', authMiddleware, upload.single('image'), asyncHandler(async (req, res) => {
+app.post('/api/products', authMiddleware, upload.array('images', 5), asyncHandler(async (req, res) => {
+
   const { title, price, description, category } = req.body;
-  if (!req.file || !title || !price || !description || !category)
+  if (!req.files || req.files.length === 0 || !title || !price || !description || !category)
     return res.status(400).json({ message: 'All fields, including image, are required.' });
 
   // Get Cloudinary URL defensively
-  const imageUrl = req.file.path || req.file?.location || req.file?.secure_url || req.file?.url;
-  if (!imageUrl) return res.status(500).json({ message: 'Failed to retrieve uploaded image URL.' });
+  const imageUrls = req.files.map(file => file.path || file.location || file.secure_url || file.url);
+  if (!imageUrls || imageUrls.length === 0) 
+    return res.status(400).json({ message: 'At least one image is required.' });
 
-  const newProduct = new Product({ title, price: Number(price), description, category, imageUrl, sellerId: req.userId });
+  const newProduct = new Product({ 
+    title, price: Number(price), 
+    description, 
+    category, 
+    imageUrl: imageUrls,
+    sellerId: req.userId });
   await newProduct.save();
   res.status(201).json(newProduct);
 }));
@@ -406,7 +431,7 @@ app.post('/api/auth/forgot-password', authLimiter, asyncHandler(async (req, res)
     </html>`;
 
   await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"Support" <no-reply@campuskart.com>',
+    from: process.env.EMAIL_FROM || '"Support" <no-reply@rebuzzar.com>',
     to: `${user.name} <${user.email}>`,
     subject: 'Password Reset Link',
     text: `Reset password: ${resetLink}`,
@@ -432,6 +457,44 @@ app.post('/api/auth/reset-password/:token', asyncHandler(async (req, res) => {
   await user.save();
 
   res.json({ message: 'Password updated successfully.' });
+}));
+
+// --- BOOKING ROUTES ---
+app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) => {
+  const { products, totalPrice } = req.body;
+
+  if (!products || products.length === 0 || !totalPrice) {
+    return res.status(400).json({ message: 'Booking requires products and a total price.' });
+  }
+
+  const newBooking = new Booking({
+    buyerId: req.userId, // From authMiddleware
+    products,
+    totalPrice,
+  });
+
+  await newBooking.save();
+
+  // Here you can later add logic to notify sellers via email
+  // For now, we just confirm the booking was created
+
+  res.status(201).json({ message: 'Booking successful!', booking: newBooking });
+}));
+
+app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) => {
+    // ... your existing create booking code
+}));
+
+// ✅ ADD THIS ROUTE: Get bookings for the logged-in user
+app.get('/api/bookings/my-bookings', authMiddleware, asyncHandler(async (req, res) => {
+    const bookings = await Booking.find({ buyerId: req.userId })
+        .populate('products.productId', 'title imageUrl') // Get product details
+        .sort({ bookingDate: -1 }); // Show newest first
+
+    if (!bookings) {
+        return res.status(404).json({ message: 'No bookings found.' });
+    }
+    res.json(bookings);
 }));
 
 // ========================
