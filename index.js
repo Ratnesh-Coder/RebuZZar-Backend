@@ -139,6 +139,36 @@ const User = mongoose.model('User', UserSchema);
 const Product = mongoose.model('Product', ProductSchema);
 
 // ========================
+// NEW: CART SCHEMA & MODEL
+// ========================
+
+/**
+ * CartItem stores a snapshot of the product at the time it was added to cart.
+ * This protects the user from price edits after adding to cart and makes checkout easier.
+ */
+const CartItemSchema = new mongoose.Schema({
+  productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+  title: { type: String, required: true },
+  price: { type: Number, required: true },
+  imageUrl: { type: [String], default: [] },
+  quantity: { type: Number, required: true, min: 1, default: 1 },
+  sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+}, { _id: false });
+
+const CartSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  items: [CartItemSchema],
+  updatedAt: { type: Date, default: Date.now },
+}, { timestamps: true });
+
+CartSchema.pre('save', function (next) {
+  this.updatedAt = Date.now();
+  next();
+});
+
+const Cart = mongoose.model('Cart', CartSchema);
+
+// ========================
 // MULTER + CLOUDINARY STORAGE CONFIG
 // ========================
 
@@ -148,14 +178,14 @@ const cloudinaryStorage = new CloudinaryStorage({
   params: {
     folder: process.env.CLOUDINARY_FOLDER || 'bw-market',
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [{ width: 1200, crop: 'limit' }], // keep images reasonable size
+    transformation: [{ width: 1200, crop: 'limit' }],
   },
 });
 
 // multer using cloudinary storage
 const upload = multer({
   storage: cloudinaryStorage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!file.mimetype.startsWith('image/')) {
       return cb(new Error('Only image files allowed (jpeg, png, webp).'), false);
@@ -199,7 +229,7 @@ const adminMiddleware = async (req, res, next) => {
     if (!user || user.role !== 'admin') return res.status(403).json({ message: 'Access denied: Admins only.' });
     next();
   } catch (err) {
-    next(err); // Pass error to centralized handler
+    next(err); 
   }
 };
 
@@ -211,11 +241,9 @@ const adminMiddleware = async (req, res, next) => {
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // --- PROFILE ROUTES ---
-// Avatar upload: uploads to Cloudinary; we store the secure URL returned
 app.post('/api/profile/avatar', authMiddleware, upload.single('avatar'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Avatar image file is required.' });
 
-  // multer-storage-cloudinary sets file.path to the URL in many versions; be defensive
   const avatarUrl = req.file.path || req.file?.location || req.file?.secure_url || req.file?.url;
   if (!avatarUrl) return res.status(500).json({ message: 'Failed to retrieve uploaded avatar URL.' });
 
@@ -225,15 +253,13 @@ app.post('/api/profile/avatar', authMiddleware, upload.single('avatar'), asyncHa
   res.json(updatedUser);
 }));
 
-// ✅ Updated Edit Profile Route
+// Updated Edit Profile Route
 app.put('/api/profile', authMiddleware, asyncHandler(async (req, res) => {
     const { email, password, ...updates } = req.body;
 
-    // Disallow sensitive field changes
     const disallowedFields = ['role', '_id', 'email', 'password', 'resetPasswordToken', 'resetPasswordExpires'];
     disallowedFields.forEach((f) => delete updates[f]);
 
-    // Whitelisted editable fields
     const allowedUpdates = ['name', 'programType', 'department', 'year', 'studentCode', 'avatar'];
 
     const validUpdates = {};
@@ -269,25 +295,40 @@ app.get('/api/products/:id', asyncHandler(async (req, res) => {
   res.json(product);
 }));
 
+app.get('/api/products/category/:categoryName', asyncHandler(async (req, res) => {
+  const { categoryName } = req.params;
+  
+  // Find products where the category matches (case-insensitive)
+  const products = await Product.find({ 
+    category: { $regex: new RegExp(`^${categoryName}$`, 'i') },
+    status: 'approved' // Ensure you only show approved products
+  });
+
+  if (!products || products.length === 0) {
+    return res.json([]); 
+  }
+
+  res.json(products);
+}));
+
 app.get('/api/profile/products', authMiddleware, asyncHandler(async (req, res) => {
   const userProducts = await Product.find({ sellerId: req.userId });
   res.json(userProducts);
 }));
 
-// Create product: upload image to Cloudinary and store returned URL
 app.post('/api/products', authMiddleware, upload.array('images', 5), asyncHandler(async (req, res) => {
 
   const { title, price, description, category } = req.body;
   if (!req.files || req.files.length === 0 || !title || !price || !description || !category)
     return res.status(400).json({ message: 'All fields, including image, are required.' });
 
-  // Get Cloudinary URL defensively
   const imageUrls = req.files.map(file => file.path || file.location || file.secure_url || file.url);
   if (!imageUrls || imageUrls.length === 0) 
     return res.status(400).json({ message: 'At least one image is required.' });
 
   const newProduct = new Product({ 
-    title, price: Number(price), 
+    title, 
+    price: Number(price), 
     description, 
     category, 
     imageUrl: imageUrls,
@@ -459,7 +500,9 @@ app.post('/api/auth/reset-password/:token', asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated successfully.' });
 }));
 
-// --- BOOKING ROUTES ---
+// ========================
+// BOOKING ROUTES
+// ========================
 app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) => {
   const { products, totalPrice } = req.body;
 
@@ -495,6 +538,116 @@ app.get('/api/bookings/my-bookings', authMiddleware, asyncHandler(async (req, re
         return res.status(404).json({ message: 'No bookings found.' });
     }
     res.json(bookings);
+}));
+
+// ========================
+// NEW: CART ROUTES
+// ========================
+// Get or create cart for user
+app.get('/api/cart', authMiddleware, asyncHandler(async (req, res) => {
+  let cart = await Cart.findOne({ userId: req.userId });
+  if (!cart) {
+    cart = new Cart({ userId: req.userId, items: [] });
+    await cart.save();
+  }
+  res.json(cart);
+}));
+
+// Add item to cart (snapshot style)
+app.post('/api/cart/add', authMiddleware, asyncHandler(async (req, res) => {
+  const { productId, quantity = 1 } = req.body;
+
+  if (!productId || !validator.isMongoId(String(productId)))
+    return res.status(400).json({ message: 'Valid productId is required.' });
+
+  const qty = parseInt(quantity, 10) || 1;
+  if (qty < 1) return res.status(400).json({ message: 'Quantity must be at least 1.' });
+
+  const product = await Product.findById(productId);
+  if (!product) return res.status(404).json({ message: 'Product not found.' });
+  if (product.status !== 'approved') return res.status(400).json({ message: 'Product is not available for purchase.' });
+
+  let cart = await Cart.findOne({ userId: req.userId });
+  if (!cart) {
+    cart = new Cart({ userId: req.userId, items: [] });
+  }
+
+  const existingIndex = cart.items.findIndex(item => item.productId.toString() === product._id.toString());
+  if (existingIndex > -1) {
+    // Update quantity
+    cart.items[existingIndex].quantity += qty;
+    // Also update snapshot fields in case you want to refresh title/price/img (optional)
+    cart.items[existingIndex].price = product.price;
+    cart.items[existingIndex].title = product.title;
+    cart.items[existingIndex].imageUrl = product.imageUrl || [];
+    cart.items[existingIndex].sellerId = product.sellerId;
+  } else {
+    // Push a snapshot of the product
+    cart.items.push({
+      productId: product._id,
+      title: product.title,
+      price: product.price,
+      imageUrl: product.imageUrl || [],
+      quantity: qty,
+      sellerId: product.sellerId
+    });
+  }
+
+  await cart.save();
+  res.status(200).json({ message: 'Product added to cart successfully.', cart });
+}));
+
+// Update item quantity in cart or remove if quantity <= 0
+app.put('/api/cart/item/:productId', authMiddleware, asyncHandler(async (req, res) => {
+  const { productId } = req.params;
+  const { quantity } = req.body;
+
+  if (!validator.isMongoId(productId)) return res.status(400).json({ message: 'Invalid productId.' });
+
+  const qty = parseInt(quantity, 10);
+  if (isNaN(qty)) return res.status(400).json({ message: 'Quantity must be a number.' });
+
+  const cart = await Cart.findOne({ userId: req.userId });
+  if (!cart) return res.status(404).json({ message: 'Cart not found.' });
+
+  const itemIndex = cart.items.findIndex(i => i.productId.toString() === productId.toString());
+  if (itemIndex === -1) return res.status(404).json({ message: 'Item not found in cart.' });
+
+  if (qty <= 0) {
+    // remove item
+    cart.items.splice(itemIndex, 1);
+  } else {
+    cart.items[itemIndex].quantity = qty;
+  }
+
+  await cart.save();
+  res.json({ message: 'Cart updated successfully.', cart });
+}));
+
+// Remove item from cart
+app.delete('/api/cart/item/:productId', authMiddleware, asyncHandler(async (req, res) => {
+  const { productId } = req.params;
+  if (!validator.isMongoId(productId)) return res.status(400).json({ message: 'Invalid productId.' });
+
+  const cart = await Cart.findOne({ userId: req.userId });
+  if (!cart) return res.status(404).json({ message: 'Cart not found.' });
+
+  const prevLen = cart.items.length;
+  cart.items = cart.items.filter(i => i.productId.toString() !== productId.toString());
+  if (cart.items.length === prevLen) return res.status(404).json({ message: 'Item not found in cart.' });
+
+  await cart.save();
+  res.json({ message: 'Item removed from cart.', cart });
+}));
+
+// Clear entire cart
+app.post('/api/cart/clear', authMiddleware, asyncHandler(async (req, res) => {
+  const cart = await Cart.findOne({ userId: req.userId });
+  if (!cart) return res.status(404).json({ message: 'Cart not found.' });
+
+  cart.items = [];
+  await cart.save();
+  res.json({ message: 'Cart cleared successfully.', cart });
 }));
 
 // ========================
