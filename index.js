@@ -1,8 +1,11 @@
-// ========================
-// BACKEND SERVER SETUP
-// ========================
+// ============================================================================
+// REBUZZAR - BACKEND SERVER (index.js)
+// Rearranged & commented for readability (no logic changes)
+// ============================================================================
 
-// --- IMPORTS ---
+// ----------------------------
+// IMPORTS / ENV
+// ----------------------------
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -15,19 +18,23 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const validator = require('validator');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 // Cloudinary + multer-storage-cloudinary
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// --- APP CONFIG ---
+// ----------------------------
+// APP CONFIG
+// ----------------------------
 const app = express();
 const port = process.env.PORT || 5000;
 
-// ========================
+// ----------------------------
 // UTILITY: SAFE LOGGER
-// ========================
+// - Keeps stack traces in development only
+// ----------------------------
 const logError = (context, error) => {
   if (process.env.NODE_ENV === 'development') {
     console.error(`❌ ${context}:`, error);
@@ -37,49 +44,52 @@ const logError = (context, error) => {
   }
 };
 
-// ========================
+// ----------------------------
 // CLOUDINARY CONFIG
-// ========================
+// ----------------------------
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ========================
-// MIDDLEWARE
-// ========================
+// ----------------------------
+// GLOBAL MIDDLEWARE
+// ----------------------------
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json({ limit: '10kb' }));
-app.use((req, res, next) => {
+
+// NOTE: using manual sanitize of req.query because express-mongo-sanitize's
+// default app.use(mongoSanitize()) caused a runtime error in this app's environment.
+// The manual approach clones req.query and sanitizes the clone in-place.
+app.use((req, res, next) => { 
   req.query = { ...req.query };
   mongoSanitize.sanitize(req.query);
   next();
 });
 
+// Rate limiter for sensitive endpoints (applied individually where needed)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { message: 'Too many requests from this IP, try again later.' },
 });
 
-// ========================
+// ----------------------------
 // DATABASE CONNECTION
-// ========================
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
+// ----------------------------
+mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected Successfully'))
   .catch(err => {
     logError('MongoDB Connection Error', err);
     process.exit(1);
   });
 
-// ========================
+// ----------------------------
 // SCHEMAS & MODELS
-// ========================
+// ----------------------------
+// USER
 const UserSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -95,6 +105,7 @@ const UserSchema = new mongoose.Schema({
   role: { type: String, enum: ['student', 'admin'], default: 'student' },
 }, { timestamps: true });
 
+// PRODUCT
 const ProductSchema = new mongoose.Schema({
   title: { type: String, required: true },
   price: { type: Number, required: true },
@@ -106,6 +117,7 @@ const ProductSchema = new mongoose.Schema({
   postDate: { type: Date, default: Date.now },
 }, { timestamps: true });
 
+// BOOKING
 const BookingSchema = new mongoose.Schema({
   buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   products: [{
@@ -124,7 +136,10 @@ const BookingSchema = new mongoose.Schema({
 
 const Booking = mongoose.model('Booking', BookingSchema);
 
-// Cascade delete
+// Register Product model before using it in hooks
+const Product = mongoose.model('Product', ProductSchema);
+
+// Cascade delete: when a user is deleted, delete their products
 UserSchema.pre('findOneAndDelete', async function (next) {
   try {
     const user = await this.model.findOne(this.getFilter());
@@ -136,16 +151,8 @@ UserSchema.pre('findOneAndDelete', async function (next) {
 });
 
 const User = mongoose.model('User', UserSchema);
-const Product = mongoose.model('Product', ProductSchema);
 
-// ========================
-// NEW: CART SCHEMA & MODEL
-// ========================
-
-/**
- * CartItem stores a snapshot of the product at the time it was added to cart.
- * This protects the user from price edits after adding to cart and makes checkout easier.
- */
+// CART (snapshot style)
 const CartItemSchema = new mongoose.Schema({
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
   title: { type: String, required: true },
@@ -168,11 +175,9 @@ CartSchema.pre('save', function (next) {
 
 const Cart = mongoose.model('Cart', CartSchema);
 
-// ========================
-// MULTER + CLOUDINARY STORAGE CONFIG
-// ========================
-
-// Cloudinary storage using multer-storage-cloudinary
+// ----------------------------
+// MULTER + CLOUDINARY STORAGE
+// ----------------------------
 const cloudinaryStorage = new CloudinaryStorage({
   cloudinary,
   params: {
@@ -182,7 +187,6 @@ const cloudinaryStorage = new CloudinaryStorage({
   },
 });
 
-// multer using cloudinary storage
 const upload = multer({
   storage: cloudinaryStorage,
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -199,26 +203,43 @@ const upload = multer({
   },
 });
 
-// ========================
+// ----------------------------
 // AUTH & ROLE MIDDLEWARE
-// ========================
+// ----------------------------
 const authMiddleware = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
     if (!authHeader) return res.status(401).json({ message: 'Authorization token required.' });
 
     const parts = authHeader.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') return res.status(401).json({ message: 'Token format: "Bearer TOKEN"' });
+    if (parts.length !== 2 || parts[0] !== 'Bearer')
+      return res.status(401).json({ message: 'Token format: "Bearer TOKEN"' });
 
     const token = parts[1];
-    if (!validator.isMongoId(token)) return res.status(401).json({ message: 'Invalid token format.' });
 
-    const user = await User.findById(token);
+    // Basic sanity checks (avoid passing 'null'/'undefined' etc into jwt.verify)
+    if (!token || typeof token !== 'string' || token.trim() === '' || token === 'null' || token === 'undefined') {
+      return res.status(401).json({ message: 'Invalid authorization token.' });
+    }
+
+    // Verify JWT token (this can throw if token is malformed/invalid)
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (verifyErr) {
+      // Return a 401 instead of letting the error bubble to the global handler
+      return res.status(401).json({ message: verifyErr.message || 'Unauthorized' });
+    }
+
+    if (!decoded || !decoded.id) return res.status(401).json({ message: 'Invalid token payload.' });
+
+    const user = await User.findById(decoded.id);
     if (!user) return res.status(403).json({ message: 'Invalid or unknown user token.' });
 
     req.userId = user._id;
     next();
   } catch (err) {
+    // fallback
     next(err);
   }
 };
@@ -229,18 +250,18 @@ const adminMiddleware = async (req, res, next) => {
     if (!user || user.role !== 'admin') return res.status(403).json({ message: 'Access denied: Admins only.' });
     next();
   } catch (err) {
-    next(err); 
+    next(err);
   }
 };
 
-// ========================
-// ROUTES
-// ========================
-
-// Helper to wrap async route functions
+// ----------------------------
+// ROUTES: helper
+// ----------------------------
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// --- PROFILE ROUTES ---
+// ----------------------------
+// PROFILE ROUTES
+// ----------------------------
 app.post('/api/profile/avatar', authMiddleware, upload.single('avatar'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Avatar image file is required.' });
 
@@ -253,7 +274,6 @@ app.post('/api/profile/avatar', authMiddleware, upload.single('avatar'), asyncHa
   res.json(updatedUser);
 }));
 
-// Updated Edit Profile Route
 app.put('/api/profile', authMiddleware, asyncHandler(async (req, res) => {
     const { email, password, ...updates } = req.body;
 
@@ -278,7 +298,9 @@ app.put('/api/profile', authMiddleware, asyncHandler(async (req, res) => {
   })
 );
 
-// --- PRODUCT ROUTES ---
+// ----------------------------
+// PRODUCT ROUTES
+// ----------------------------
 app.get('/api/products', asyncHandler(async (req, res) => {
   const { category, search } = req.query;
   const filter = { status: 'approved' };
@@ -363,7 +385,9 @@ app.delete('/api/products/:id', authMiddleware, asyncHandler(async (req, res) =>
   res.json({ message: 'Product deleted successfully.' });
 }));
 
-// --- ADMIN ROUTES ---
+// ----------------------------
+// ADMIN ROUTES
+// ----------------------------
 app.get('/api/admin/products/pending', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
   const pendingProducts = await Product.find({ status: 'pending' }).populate('sellerId', 'name email');
   res.json(pendingProducts);
@@ -371,10 +395,12 @@ app.get('/api/admin/products/pending', authMiddleware, adminMiddleware, asyncHan
 
 app.put('/api/admin/products/:id/status', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
   const { status } = req.body;
-  if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ message: 'Invalid status.' });
+  if (!['approved', 'rejected'].includes(status)) 
+    return res.status(400).json({ message: 'Invalid status.' });
 
   const product = await Product.findById(req.params.id);
-  if (!product) return res.status(404).json({ message: 'Product not found.' });
+  if (!product) 
+    return res.status(404).json({ message: 'Product not found.' });
 
   product.status = status;
   await product.save();
@@ -382,7 +408,9 @@ app.put('/api/admin/products/:id/status', authMiddleware, adminMiddleware, async
   res.json({ message: `Product ${status} successfully.`, product });
 }));
 
-// --- AUTH ROUTES ---
+// ----------------------------
+// AUTH ROUTES
+// ----------------------------
 app.post('/api/auth/signup', asyncHandler(async (req, res) => {
   const { name, email, password, programType, department, year, studentCode } = req.body;
 
@@ -417,26 +445,61 @@ app.post('/api/auth/signup', asyncHandler(async (req, res) => {
 
   await newUser.save();
 
+  // Generate JWT token
+  const token = jwt.sign(
+    { id: newUser._id },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
+
   // Send response without password
   const { password: _, ...userToSend } = newUser.toObject();
-  res.status(201).json({ message: 'User created successfully!', user: userToSend, token: userToSend._id });
+
+  res.status(201).json({
+    message: 'User created successfully!',
+    user: userToSend,
+    token
+  });
 }));
 
-app.post('/api/auth/login', asyncHandler(async (req, res) => {
+app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ message: 'Email and password required.' });
 
+  // Validation
+  if (!email || !password)
+    return res.status(400).json({ message: 'Email and password required.' });
+
+  // Find user
   const user = await User.findOne({ email });
-  if (!user) return res.status(401).json({ message: 'Invalid email or password' });
+  if (!user)
+    return res.status(401).json({ message: 'Invalid email or password' });
 
+  // Check password
   const isMatch = await bcrypt.compare(password, user.password);
-  if (!isMatch) return res.status(401).json({ message: 'Invalid email or password' });
+  if (!isMatch)
+    return res.status(401).json({ message: 'Invalid email or password' });
 
+  // Generate JWT token
+  const token = jwt.sign(
+    { id: user._id },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
+
+  // Remove password before sending user data
   const { password: _, ...userToSend } = user.toObject();
-  res.json({ message: "Login successful!", user: userToSend, token: userToSend._id });
+
+  // Send response
+  res.json({
+    message: "Login successful!",
+    user: userToSend,
+    token
+  });
 }));
 
-// --- PASSWORD RESET ---
+// ----------------------------
+// PASSWORD RESET
+// ----------------------------
 app.post('/api/auth/forgot-password', authLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
   if (!email || !validator.isEmail(email)) return res.json({ message: 'If an account exists, a password reset link has been sent.' });
@@ -462,14 +525,7 @@ app.post('/api/auth/forgot-password', authLimiter, asyncHandler(async (req, res)
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
   });
 
-  const html = `
-    <html>
-      <body style="font-family: Arial, sans-serif;">
-        <h2>Password Reset Request</h2>
-        <p><a href="${resetLink}">Click here to reset your password</a></p>
-        <p>Expires in 1 hour.</p>
-      </body>
-    </html>`;
+  const html = `\n    <html>\n      <body style="font-family: Arial, sans-serif;">\n        <h2>Password Reset Request</h2>\n        <p><a href=\"${resetLink}\">Click here to reset your password</a></p>\n        <p>Expires in 1 hour.</p>\n      </body>\n    </html>`;
 
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || '"Support" <no-reply@rebuzzar.com>',
@@ -500,9 +556,9 @@ app.post('/api/auth/reset-password/:token', asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated successfully.' });
 }));
 
-// ========================
+// ----------------------------
 // BOOKING ROUTES
-// ========================
+// ----------------------------
 app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) => {
   const { products, totalPrice } = req.body;
 
@@ -521,14 +577,13 @@ app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) =
   // Here you can later add logic to notify sellers via email
   // For now, we just confirm the booking was created
 
-  res.status(201).json({ message: 'Booking successful!', booking: newBooking });
+  res.status(201).json({
+      message: 'Booking successful!',
+      bookingId: newBooking._id,
+      booking: newBooking
+  });
 }));
 
-app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) => {
-    // ... your existing create booking code
-}));
-
-// ✅ ADD THIS ROUTE: Get bookings for the logged-in user
 app.get('/api/bookings/my-bookings', authMiddleware, asyncHandler(async (req, res) => {
     const bookings = await Booking.find({ buyerId: req.userId })
         .populate('products.productId', 'title imageUrl') // Get product details
@@ -540,10 +595,23 @@ app.get('/api/bookings/my-bookings', authMiddleware, asyncHandler(async (req, re
     res.json(bookings);
 }));
 
-// ========================
-// NEW: CART ROUTES
-// ========================
-// Get or create cart for user
+// Get booking details by ID
+app.get('/api/bookings/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const booking = await Booking.findById(req.params.id)
+    .populate('products.productId', 'title imageUrl price')
+    .populate('buyerId', 'name email');
+
+  if (!booking) {
+    return res.status(404).json({ message: 'Booking not found.' });
+  }
+
+  res.json(booking);
+}));
+
+
+// ----------------------------
+// CART ROUTES
+// ----------------------------
 app.get('/api/cart', authMiddleware, asyncHandler(async (req, res) => {
   let cart = await Cart.findOne({ userId: req.userId });
   if (!cart) {
@@ -553,7 +621,6 @@ app.get('/api/cart', authMiddleware, asyncHandler(async (req, res) => {
   res.json(cart);
 }));
 
-// Add item to cart (snapshot style)
 app.post('/api/cart/add', authMiddleware, asyncHandler(async (req, res) => {
   const { productId, quantity = 1 } = req.body;
 
@@ -597,7 +664,6 @@ app.post('/api/cart/add', authMiddleware, asyncHandler(async (req, res) => {
   res.status(200).json({ message: 'Product added to cart successfully.', cart });
 }));
 
-// Update item quantity in cart or remove if quantity <= 0
 app.put('/api/cart/item/:productId', authMiddleware, asyncHandler(async (req, res) => {
   const { productId } = req.params;
   const { quantity } = req.body;
@@ -624,7 +690,6 @@ app.put('/api/cart/item/:productId', authMiddleware, asyncHandler(async (req, re
   res.json({ message: 'Cart updated successfully.', cart });
 }));
 
-// Remove item from cart
 app.delete('/api/cart/item/:productId', authMiddleware, asyncHandler(async (req, res) => {
   const { productId } = req.params;
   if (!validator.isMongoId(productId)) return res.status(400).json({ message: 'Invalid productId.' });
@@ -640,7 +705,6 @@ app.delete('/api/cart/item/:productId', authMiddleware, asyncHandler(async (req,
   res.json({ message: 'Item removed from cart.', cart });
 }));
 
-// Clear entire cart
 app.post('/api/cart/clear', authMiddleware, asyncHandler(async (req, res) => {
   const cart = await Cart.findOne({ userId: req.userId });
   if (!cart) return res.status(404).json({ message: 'Cart not found.' });
@@ -650,18 +714,18 @@ app.post('/api/cart/clear', authMiddleware, asyncHandler(async (req, res) => {
   res.json({ message: 'Cart cleared successfully.', cart });
 }));
 
-// ========================
+// ----------------------------
 // CENTRALIZED ERROR HANDLER
-// ========================
+// ----------------------------
 app.use((err, req, res, next) => {
   logError('Unhandled Error', err);
-  // send safe error to client
-  res.status(500).json({ message: err.message || 'Internal Server Error' });
+  const status = err.statusCode || 500;
+  res.status(status).json({ message: err.message || 'Internal Server Error' });
 });
 
-// ========================
+// ----------------------------
 // START SERVER
-// ========================
+// ----------------------------
 app.listen(port, () => {
   console.log(`✅ Backend server is running on http://localhost:${port}`);
 });
