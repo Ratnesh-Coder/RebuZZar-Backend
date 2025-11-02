@@ -558,6 +558,20 @@ app.post('/api/auth/reset-password/:token', asyncHandler(async (req, res) => {
 }));
 
 // ----------------------------
+// NODEMAILER TRANSPORTER
+// ----------------------------
+const mailPort = Number(process.env.EMAIL_PORT) || 465;
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST,
+  port: mailPort,
+  secure: process.env.EMAIL_SECURE === 'true' || mailPort === 465,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+// ----------------------------
 // BOOKING ROUTES
 // ----------------------------
 app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) => {
@@ -575,11 +589,138 @@ app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) =
 
   await newBooking.save();
 
-  // Here you can later add logic to notify sellers via email
-  // For now, we just confirm the booking was created
-
   for (const item of products) {
     await Product.findByIdAndUpdate(item.productId, { isBooked: true });
+  }
+
+  // ----------------------------
+  // EMAIL NOTIFICATIONS
+  // ----------------------------
+  // Fetch buyer info and product details (including seller)
+  const buyer = await User.findById(req.userId).select('name email');
+  const productIds = products.map(p => p.productId);
+  const bookedProducts = await Product.find({ _id: { $in: productIds } }).populate('sellerId', 'name email');
+
+  // Prepare nodemailer transporter (uses existing env variables)
+  const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: Number(process.env.EMAIL_PORT) || 587,
+    secure: process.env.EMAIL_SECURE === 'true' || (process.env.EMAIL_PORT === '465'),
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+
+  // --- Buyer email ---
+  const buyerProductsHtml = bookedProducts.map(p => {
+    const qty = (products.find(x => String(x.productId) === String(p._id)) || {}).quantity || 1;
+    const priceSnapshot = (products.find(x => String(x.productId) === String(p._id)) || {}).price ?? p.price;
+    return `<li><b>${p.title}</b> — Qty: ${qty} — ₹${Number(priceSnapshot).toLocaleString('en-IN')}</li>`;
+  }).join('');
+
+  const buyerMail = {
+    from: `"RebuZZar" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+    to: buyer.email,
+    subject: 'Booking Confirmation — RebuZZar',
+    html: `
+      <div style="font-family: Arial, sans-serif; color: #222;">
+        <h3>Hi ${buyer.name},</h3>
+        <p>Thank you for booking with RebuZZar. Your booking is confirmed.</p>
+        <p><strong>Booking ID:</strong> ${newBooking._id}</p>
+        <p><strong>Items booked:</strong></p>
+        <ul>${buyerProductsHtml}</ul>
+        <p><strong>Total:</strong> ₹${Number(totalPrice).toLocaleString('en-IN')}</p>
+        <p>We will notify you with delivery / pickup details shortly.</p>
+        <p>— RebuZZar Team</p>
+      </div>
+    `
+  };
+
+  // --- Admin email ---
+  const adminProductsHtml = bookedProducts.map(p => {
+    const qty = (products.find(x => String(x.productId) === String(p._id)) || {}).quantity || 1;
+    const priceSnapshot = (products.find(x => String(x.productId) === String(p._id)) || {}).price ?? p.price;
+    return `<li>
+      <b>${p.title}</b> — Qty: ${qty} — ₹${Number(priceSnapshot).toLocaleString('en-IN')}
+      <br/><small>Seller: ${p.sellerId?.name || 'N/A'} (${p.sellerId?.email || 'N/A'})</small>
+    </li>`;
+  }).join('');
+
+  const adminMail = {
+    from: `"RebuZZar System" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+    to: process.env.ADMIN_EMAIL, // <--- make sure ADMIN_EMAIL is set in .env
+    subject: `New Booking (${buyer.name}) — ${bookedProducts.length} item(s)`,
+    html: `
+      <div style="font-family: Arial, sans-serif; color: #222;">
+        <h3>New Booking Alert</h3>
+        <p><strong>Buyer:</strong> ${buyer.name} — ${buyer.email}</p>
+        <p><strong>Booking ID:</strong> ${newBooking._id}</p>
+        <p><strong>Total:</strong> ₹${Number(totalPrice).toLocaleString('en-IN')}</p>
+        <p><strong>Items:</strong></p>
+        <ul>${adminProductsHtml}</ul>
+        <p>Note: sellers will be notified that their item is booked. Pickup date/time will be provided separately.</p>
+      </div>
+    `
+  };
+
+  // --- Seller emails (one email per seller, listing only that seller's sold items) ---
+  // group products by seller email
+  const sellerMap = new Map(); // sellerId -> { seller, items: [] }
+  for (const p of bookedProducts) {
+    const seller = p.sellerId;
+    if (!seller || !seller.email) continue; // skip if no seller contact
+    const key = String(seller._id);
+    const qty = (products.find(x => String(x.productId) === String(p._id)) || {}).quantity || 1;
+    const priceSnapshot = (products.find(x => String(x.productId) === String(p._id)) || {}).price ?? p.price;
+    const itemEntry = { title: p.title, qty, price: priceSnapshot, id: p._id };
+
+    if (!sellerMap.has(key)) {
+      sellerMap.set(key, { seller, items: [itemEntry] });
+    } else {
+      sellerMap.get(key).items.push(itemEntry);
+    }
+  }
+
+  const sellerMailPromises = [];
+  for (const [_, { seller, items }] of sellerMap) {
+    const itemsHtml = items.map(it => `<li><b>${it.title}</b> — Qty: ${it.qty} — ₹${Number(it.price).toLocaleString('en-IN')}</li>`).join('');
+    const sellerMail = {
+      from: `"RebuZZar" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+      to: seller.email,
+      subject: `Your item(s) have been booked on RebuZZar`,
+      html: `
+        <div style="font-family: Arial, sans-serif; color: #222;">
+          <h3>Hi ${seller.name || 'Seller'},</h3>
+          <p>The following item(s) of yours have been booked on RebuZZar:</p>
+          <ul>${itemsHtml}</ul>
+          <p><strong>Booking ID:</strong> ${newBooking._id}</p>
+          <p>We will notify you soon with the pickup date & time.</p>
+          <p>Please do not contact the buyer directly — RebuZZar will coordinate pickup/delivery.</p>
+          <p>— RebuZZar Team</p>
+        </div>
+      `
+    };
+
+    sellerMailPromises.push(transporter.sendMail(sellerMail).catch(err => {
+      // log seller mail error but do not break the whole flow
+      console.error('Seller mail error for', seller.email, err && err.message ? err.message : err);
+      return null;
+    }));
+  }
+
+  // Send buyer + admin + all seller emails (safely)
+  try {
+    // buyer + admin in parallel, plus all seller promises
+    await Promise.all([
+      transporter.sendMail(buyerMail),
+      transporter.sendMail(adminMail),
+      ...sellerMailPromises
+    ]);
+  } catch (err) {
+    // if sending fails, log but booking is already created & products marked booked
+    console.error('Booking created but failed to send one or more emails:', err);
+    // We still respond success to frontend; emails can be retried separately if needed.
   }
 
   res.status(201).json({
