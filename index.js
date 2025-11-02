@@ -115,6 +115,7 @@ const ProductSchema = new mongoose.Schema({
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
   postDate: { type: Date, default: Date.now },
+  isBooked: { type: Boolean, default: false },
 }, { timestamps: true });
 
 // BOOKING
@@ -577,6 +578,10 @@ app.post('/api/bookings/create', authMiddleware, asyncHandler(async (req, res) =
   // Here you can later add logic to notify sellers via email
   // For now, we just confirm the booking was created
 
+  for (const item of products) {
+    await Product.findByIdAndUpdate(item.productId, { isBooked: true });
+  }
+
   res.status(201).json({
       message: 'Booking successful!',
       bookingId: newBooking._id,
@@ -608,6 +613,34 @@ app.get('/api/bookings/:id', authMiddleware, asyncHandler(async (req, res) => {
   res.json(booking);
 }));
 
+// ✅ Cancel Booking Route (fixed)
+app.put('/api/bookings/:id/cancel', authMiddleware, async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found.' });
+    }
+
+    // ✅ Ensure only the booking owner can cancel
+    if (booking.buyerId.toString() !== req.userId.toString()) {
+      return res.status(403).json({ message: 'Not authorized to cancel this booking.' });
+    }
+
+    // ✅ Prevent cancelling already cancelled or delivered bookings
+    if (['Cancelled', 'Delivered'].includes(booking.status)) {
+      return res.status(400).json({ message: `Cannot cancel a ${booking.status.toLowerCase()} booking.` });
+    }
+
+    booking.status = 'Cancelled';
+    await booking.save();
+
+    res.status(200).json({ message: 'Booking cancelled successfully', booking });
+  } catch (err) {
+    console.error('Cancel Booking Error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
 
 // ----------------------------
 // CART ROUTES
