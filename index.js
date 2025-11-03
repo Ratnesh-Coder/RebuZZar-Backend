@@ -518,22 +518,28 @@ app.post('/api/auth/forgot-password', authLimiter, asyncHandler(async (req, res)
   const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
   const resetLink = `${FRONTEND_URL}/reset-password/${rawToken}`;
 
-  const mailPort = Number(process.env.EMAIL_PORT) || 587;
   const transporter = nodemailer.createTransport({
     host: process.env.EMAIL_HOST,
-    port: mailPort,
-    secure: process.env.EMAIL_SECURE === 'true' || mailPort === 465,
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+    port: Number(process.env.EMAIL_PORT) || 587,
+    secure: process.env.EMAIL_SECURE === 'true',
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
   });
 
-  const html = `\n    <html>\n      <body style="font-family: Arial, sans-serif;">\n        <h2>Password Reset Request</h2>\n        <p><a href=\"${resetLink}\">Click here to reset your password</a></p>\n        <p>Expires in 1 hour.</p>\n      </body>\n    </html>`;
+  const html = `
+    <html>
+      <body style="font-family: Arial, sans-serif;">
+        <h2>Password Reset Request</h2>
+        <p>Click below to reset your password:</p>
+        <a href="${resetLink}" style="background:#007bff;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">Reset Password</a>
+        <p>This link will expire in 1 hour.</p>
+      </body>
+    </html>`;
 
   await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"Support" <no-reply@rebuzzar.com>',
-    to: `${user.name} <${user.email}>`,
-    subject: 'Password Reset Link',
-    text: `Reset password: ${resetLink}`,
-    html
+    from: process.env.EMAIL_FROM,
+    to: user.email,
+    subject: 'Password Reset Link - RebuZZar',
+    html,
   });
 
   res.json({ message: 'If an account exists, a password reset link has been sent.' });
@@ -757,14 +763,16 @@ app.get('/api/bookings/:id', authMiddleware, asyncHandler(async (req, res) => {
 // ✅ Cancel Booking Route (fixed)
 app.put('/api/bookings/:id/cancel', authMiddleware, async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
+    const booking = await Booking.findById(req.params.id)
+    .populate('buyerId', 'name email')
+    .populate('products.productId', 'title price sellerId');
 
     if (!booking) {
       return res.status(404).json({ message: 'Booking not found.' });
     }
 
     // ✅ Ensure only the booking owner can cancel
-    if (booking.buyerId.toString() !== req.userId.toString()) {
+    if (booking.buyerId._id.toString() !== req.userId.toString()) {
       return res.status(403).json({ message: 'Not authorized to cancel this booking.' });
     }
 
@@ -776,7 +784,79 @@ app.put('/api/bookings/:id/cancel', authMiddleware, async (req, res) => {
     booking.status = 'Cancelled';
     await booking.save();
 
-    res.status(200).json({ message: 'Booking cancelled successfully', booking });
+    // 🟢 Mark all related products as available again
+    const productIds = booking.products.map(p => p.productId);
+    await Product.updateMany(
+      { _id: { $in: productIds } },
+      { $set: { isBooked: false } }
+    );
+
+    // ✅ Get seller info
+  const sellerIds = booking.products.map(p => p.productId.sellerId);
+  const sellers = await User.find({ _id: { $in: sellerIds } }, 'name email');
+
+  // ✅ Setup mail transporter
+  const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: Number(process.env.EMAIL_PORT) || 587,
+    secure: process.env.EMAIL_SECURE === 'true',
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+  });
+
+  // ✅ Email content
+  const buyerMail = {
+    from: process.env.EMAIL_FROM,
+    to: booking.buyerId.email,
+    subject: 'Booking Cancelled - RebuZZar',
+    html: `
+      <h2>Booking Cancelled</h2>
+      <p>Hi ${booking.buyerId.name},</p>
+      <p>Your booking for the following items has been cancelled:</p>
+      <ul>
+        ${booking.products.map(p => `<li>${p.productId.title} - ₹${p.productId.price}</li>`).join('')}
+      </ul>
+      <p>If this wasn’t you, please contact RebuZZar Support.</p>
+    `,
+  };
+
+  // Send mail to each seller
+  for (const seller of sellers) {
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM,
+      to: seller.email,
+      subject: 'Item Booking Cancelled - RebuZZar',
+      html: `
+        <h2>Your Item Has Been Cancelled</h2>
+        <p>Hi ${seller.name},</p>
+        <p>The following item(s) booked from your listing have been cancelled by the buyer:</p>
+        <ul>
+          ${booking.products.map(p => `<li>${p.productId.title} - ₹${p.productId.price}</li>`).join('')}
+        </ul>
+        <p>You will be notified later about the next steps for pickup rescheduling.</p>
+      `,
+    });
+  }
+
+  // ✅ Notify admin
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM,
+    to: process.env.ADMIN_EMAIL,
+    subject: 'Booking Cancelled - RebuZZar Admin Notice',
+    html: `
+      <h2>Booking Cancelled</h2>
+      <p><strong>Buyer:</strong> ${booking.buyerId.name} (${booking.buyerId.email})</p>
+      <p><strong>Items:</strong></p>
+      <ul>
+        ${booking.products.map(p => `<li>${p.productId.title} - ₹${p.productId.price}</li>`).join('')}
+      </ul>
+    `,
+  });
+
+    res.status(200).json({
+      message: 'Booking cancelled successfully. Product(s) are now available again.',
+      booking
+    });
+
   } catch (err) {
     console.error('Cancel Booking Error:', err);
     res.status(500).json({ message: 'Internal server error' });
