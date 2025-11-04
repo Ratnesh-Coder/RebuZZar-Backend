@@ -100,6 +100,13 @@ const UserSchema = new mongoose.Schema({
   department: { type: String, required: true },
   year: { type: String, required: true },
   studentCode: { type: String }, // optional
+
+  // ---------- NEW: Email verification fields ----------
+  isVerified: { type: Boolean, default: false },        // whether email is verified
+  emailOTP: { type: String },                           // SHA256 hash of OTP (do NOT store plain OTP)
+  emailOTPExpires: { type: Date },                      // expiry timestamp for OTP
+  // ----------------------------------------------------
+
   resetPasswordToken: { type: String },
   resetPasswordExpires: { type: Date },
   role: { type: String, enum: ['student', 'admin'], default: 'student' },
@@ -433,6 +440,10 @@ app.post('/api/auth/signup', asyncHandler(async (req, res) => {
   const salt = await bcrypt.genSalt(10);
   const hashedPassword = await bcrypt.hash(password, salt);
 
+  // Generate OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const hashedOTP = crypto.createHash('sha256').update(otp).digest('hex');
+
   // Create new user
   const newUser = new User({
     name,
@@ -441,27 +452,86 @@ app.post('/api/auth/signup', asyncHandler(async (req, res) => {
     programType,
     department,
     year,
-    studentCode
+    studentCode,
+    isVerified: false,
+    emailOTP: hashedOTP,
+    emailOTPExpires: Date.now() + 10 * 60 * 1000, // 10 min expiry
   });
 
   await newUser.save();
 
-  // Generate JWT token
-  const token = jwt.sign(
-    { id: newUser._id },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-  );
+  // ✉️ Send OTP mail
+  const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: Number(process.env.EMAIL_PORT) || 587,
+    secure: process.env.EMAIL_SECURE === 'true',
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+  });
 
-  // Send response without password
-  const { password: _, ...userToSend } = newUser.toObject();
+  const mailOptions = {
+    from: process.env.EMAIL_FROM || '"RebuZZar" <no-reply@rebuzzar.com>',
+    to: newUser.email,
+    subject: 'Verify your RebuZZar Account',
+    html: `
+      <h2>Verify your RebuZZar account</h2>
+      <p>Hi ${newUser.name},</p>
+      <p>Your One-Time Password (OTP) for verification is:</p>
+      <h1 style="letter-spacing:3px;">${otp}</h1>
+      <p>This code expires in 10 minutes.</p>
+      <p>– RebuZZar Team</p>
+    `,
+  };
 
+  await transporter.sendMail(mailOptions);
+
+  // ⛔ Do NOT send token yet; user must verify OTP first
   res.status(201).json({
-    message: 'User created successfully!',
-    user: userToSend,
-    token
+    message: 'User created! OTP sent to your email for verification.',
+    userId: newUser._id,
   });
 }));
+
+// ✅ VERIFY EMAIL OTP
+app.post('/api/auth/verify-otp', asyncHandler(async (req, res) => {
+  const { userId, otp } = req.body;
+
+  if (!userId || !otp)
+    return res.status(400).json({ message: 'User ID and OTP are required.' });
+
+  const user = await User.findById(userId);
+  if (!user)
+    return res.status(404).json({ message: 'User not found.' });
+
+  // If already verified
+  if (user.isVerified)
+    return res.status(400).json({ message: 'Email already verified.' });
+
+  // Check expiry
+  if (user.emailOTPExpires < Date.now())
+    return res.status(400).json({ message: 'OTP expired. Please sign up again.' });
+
+  // Compare hash
+  const hashedOTP = crypto.createHash('sha256').update(otp).digest('hex');
+  if (hashedOTP !== user.emailOTP)
+    return res.status(400).json({ message: 'Invalid OTP.' });
+
+  // ✅ Mark verified and clear OTP fields
+  user.isVerified = true;
+  user.emailOTP = undefined;
+  user.emailOTPExpires = undefined;
+  await user.save();
+
+  // ✅ Generate token for login
+  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d'
+  });
+
+  res.status(200).json({
+    message: 'Email verified successfully!',
+    token,
+  });
+}));
+
 
 app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
   const { email, password } = req.body;
