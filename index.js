@@ -6,6 +6,8 @@
 // ----------------------------
 // IMPORTS / ENV
 // ----------------------------
+const passport = require('passport');
+const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -59,6 +61,7 @@ cloudinary.config({
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json({ limit: '10kb' }));
+app.use(passport.initialize());
 
 // NOTE: using manual sanitize of req.query because express-mongo-sanitize's
 // default app.use(mongoSanitize()) caused a runtime error in this app's environment.
@@ -261,6 +264,35 @@ const adminMiddleware = async (req, res, next) => {
     next(err);
   }
 };
+
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: process.env.GOOGLE_CALLBACK_URL,
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        const email = profile.emails[0].value;
+        let user = await User.findOne({ email });
+
+        if (!user) {
+          user = await User.create({
+            name: profile.displayName,
+            email,
+            password: crypto.randomBytes(16).toString('hex'), // random password
+            isVerified: true,
+          });
+        }
+
+        return done(null, user);
+      } catch (err) {
+        return done(err, null);
+      }
+    }
+  )
+);
 
 // ----------------------------
 // ROUTES: helper
@@ -532,6 +564,19 @@ app.post('/api/auth/verify-otp', asyncHandler(async (req, res) => {
   });
 }));
 
+// Redirect to Google login
+app.get('/api/auth/google', 
+  passport.authenticate('google', { scope: ['profile', 'email'] })
+);
+
+// Google callback
+app.get('/api/auth/google/callback',
+  passport.authenticate('google', { session: false }),
+  (req, res) => {
+    const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.redirect(`http://localhost:5173/?token=${token}`);
+  }
+);
 
 app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
   const { email, password } = req.body;
