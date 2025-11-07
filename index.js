@@ -270,24 +270,26 @@ passport.use(
     {
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: process.env.GOOGLE_CALLBACK_URL,
+      callbackURL: '/api/auth/google/callback',
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
         const email = profile.emails[0].value;
-        let user = await User.findOne({ email });
 
+        // ✅ Only allow Brainware emails
+        if (!email || !email.endsWith("@brainwareuniversity.ac.in")) {
+          return done(null, false, { message: "Only Brainware University emails are allowed." });
+        }
+
+        // ✅ Allow only existing users
+        const user = await User.findOne({ email });
         if (!user) {
-          user = await User.create({
-            name: profile.displayName,
-            email,
-            password: crypto.randomBytes(16).toString('hex'), // random password
-            isVerified: true,
-          });
+          return done(null, false, { message: "Account not found. Please sign up first." });
         }
 
         return done(null, user);
       } catch (err) {
+        console.error("Google OAuth Error:", err);
         return done(err, null);
       }
     }
@@ -565,18 +567,37 @@ app.post('/api/auth/verify-otp', asyncHandler(async (req, res) => {
 }));
 
 // Redirect to Google login
-app.get('/api/auth/google', 
+app.get('/api/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
-// Google callback
-app.get('/api/auth/google/callback',
-  passport.authenticate('google', { session: false }),
-  (req, res) => {
-    const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`http://localhost:5173/?token=${token}`);
-  }
-);
+// Google callback route (handles success + error cases)
+app.get('/api/auth/google/callback', (req, res, next) => {
+  passport.authenticate('google', { session: false }, (err, user, info) => {
+    if (err) {
+      console.error("Google login error:", err);
+      return res.redirect("http://localhost:5173/login?error=server");
+    }
+
+    // Case 1: No user or not allowed
+    if (!user) {
+      const errorMessage =
+        info?.message === "Only Brainware University emails are allowed."
+          ? "invalid_email"
+          : "no_account";
+      return res.redirect(`http://localhost:5173/login?error=${errorMessage}`);
+    }
+
+    // Case 2: Successful login
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.redirect(`http://localhost:5173/?token=${token}`);
+  })(req, res, next);
+});
 
 app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
   const { email, password } = req.body;
