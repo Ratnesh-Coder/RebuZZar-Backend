@@ -1,4 +1,5 @@
 const Product = require('../models/Product');
+const User = require('../models/User');
 const Booking = require('../models/Booking');
 const HttpError = require('../utils/httpError');
 const escapeRegex = require('../utils/escapeRegex');
@@ -74,6 +75,36 @@ exports.getProductById = async (req, res) => {
   if (!product) throw new HttpError(404, 'Product not found');
 
   res.json(product);
+};
+
+/* GET seller contact for a product */
+exports.getSellerContact = async (req, res) => {
+  const product = await Product.findOne({
+    _id: req.params.id,
+    isDeleted: NOT_DELETED,
+  });
+
+  if (!product) {
+    throw new HttpError(404, 'Product not found.');
+  }
+
+  const seller = await User.findById(product.sellerId).select(
+    'name department year phoneNumber contactPreference'
+  );
+
+  if (!seller) {
+    throw new HttpError(404, 'Seller not found.');
+  }
+
+  res.json({
+    seller: {
+      name: seller.name,
+      department: seller.department,
+      year: seller.year,
+      phoneNumber: seller.phoneNumber,
+      contactPreference: seller.contactPreference,
+    },
+  });
 };
 
 /* CREATE product */

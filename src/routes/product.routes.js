@@ -37,6 +37,7 @@ router.post(
 // =====================
 router.put('/:id', auth, productId, productController.updateProduct);
 router.delete('/:id', auth, productId, productController.deleteProduct);
+router.get('/:id/contact', auth, productId, productController.getSellerContact);
 router.get('/:id', productId, productController.getProductById);
 
 module.exports = router;
