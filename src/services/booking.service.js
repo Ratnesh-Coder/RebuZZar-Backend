@@ -115,6 +115,13 @@ const createBooking = async ({ buyer, items }) => {
   }
   if (products.some((p) => p.isBooked)) throw new HttpError(400, ALREADY_BOOKED);
 
+  // Prevent buyers from booking their own products.
+  const buyerId = String(buyer._id);
+
+  if (products.some((p) => String(p.sellerId?._id || p.sellerId) === buyerId)) {
+    throw new HttpError(403, 'You cannot book your own product.');
+  }
+
   const byId = new Map(products.map((p) => [String(p._id), p]));
 
   const lines = items.map(({ productId, quantity }) => {

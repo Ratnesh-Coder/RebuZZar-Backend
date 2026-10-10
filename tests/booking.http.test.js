@@ -198,11 +198,23 @@ test('booking: seller account gone -> falls back to the stored seller snapshot',
   assert.equal(r.json.booking.products[0].sellerEmail, 'snap@brainwareuniversity.ac.in');
 });
 
-test('booking: self-purchase is still allowed (existing behaviour preserved, flagged as a product decision)', async () => {
-  const me = makeUser(); const token = authAs(me); h.stubMail();
-  const p = dbProduct({ sellerId: { _id: me._id, name: me.name, email: me.email } });
-  stubDb([p]);
-  assert.equal((await create(token, { products: [{ productId: String(p._id), quantity: 1 }] })).status, 201);
+
+test('booking: seller cannot book their own product', async () => {
+  const me = makeUser();
+  const token = authAs(me);
+  const p = dbProduct({
+    sellerId: { _id: me._id, name: me.name, email: me.email },
+  });
+  const cap = stubDb([p]);
+
+  const r = await create(token, {
+    products: [{ productId: String(p._id), quantity: 1 }],
+  });
+
+  assert.equal(r.status, 403);
+  assert.equal(r.json.message, 'You cannot book your own product.');
+  assert.equal(cap.created.length, 0);
+  assert.equal(cap.locks.length, 0);
 });
 
 /* ---------------- read: ownership / IDOR ---------------- */
