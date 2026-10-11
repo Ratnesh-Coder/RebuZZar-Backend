@@ -86,6 +86,14 @@ const getOAuthClient = () => {
 router.get('/google', (req, res, next) => {
   try {
     const expected = process.env.GMAIL_OAUTH_SETUP_KEY;
+    
+    console.log('[Gmail OAuth setup]', {
+      keyConfigured: Boolean(expected),
+      suppliedKeyPresent: Boolean(supplied),
+      expectedLength: expected?.length ?? 0,
+      suppliedLength: supplied.length,
+    });
+
     const supplied = typeof req.query.key === 'string' ? req.query.key : '';
 
     if (!expected || !supplied ||
